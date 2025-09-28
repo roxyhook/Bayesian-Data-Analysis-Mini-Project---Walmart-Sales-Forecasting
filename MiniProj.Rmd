@@ -1,0 +1,284 @@
+---
+title: "MiniProj"
+author: "Matthew Anthony Tjahjadi"
+date: "2024-12-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rjags)
+```
+
+###Number 1
+```{r}
+data<-read.csv("Walmart_Sales.csv")
+str(data)
+```
+
+####Linear Regression Model
+```{r}
+y <- data$Weekly_Sales #target variable
+X <- as.matrix(data[, c("Holiday_Flag", "Temperature", "Fuel_Price", "CPI", "Unemployment")])
+x <- scale(X)
+n <- nrow(x)
+p <- ncol(x)
+```
+
+```{r}
+data <- list(y=y,x=x,n=n,p=p)
+params <- c("alpha","beta","like")
+burn <- 1000
+n.iter <- 10000
+n.chains <- 3
+```
+
+```{r}
+#using uninformative gaussian model
+model_string <- textConnection("model {
+   # Likelihood
+   for (i in 1:n) {
+      y[i] ~ dnorm(mu[i], tau)
+      mu[i] <- alpha + inprod(x[i,], beta[])
+      like[i] <- logdensity.norm(y[i], mu[i], tau)
+   }
+   
+   # Priors
+   for (j in 1:p) {
+      beta[j] ~ dnorm(0, 0.001)
+   }
+   alpha ~ dnorm(0, 0.001)
+   tau ~ dgamma(0.1, 0.1)
+}")
+```
+
+```{r}
+model1 <- jags.model(model_string,data = data, n.chains=n.chains,quiet=TRUE)
+update(model1, burn, progress.bar="none")
+samples1 <- coda.samples(model1, variable.names=params, n.iter=n.iter, progress.bar="none")
+```
+
+####Logistic Regression Model
+```{r}
+boxplot(data$y)
+```
+```{r}
+#lots of outliers, so we will use median as the threshold to binarize our target variable into 2 classes
+threshold <- median(data$y, na.rm = TRUE)
+y<- ifelse(data$y>threshold,1,0)
+
+#Where 1 indicates high sales, and 0 indicates low sales
+```
+
+
+```{r}
+#logistic regression model using bernoulli likelihood
+model_string <- textConnection("model{
+  # Likelihood
+  for(i in 1:n){
+    y[i] ~ dbern(pi[i])  
+    logit(pi[i]) <- alpha + inprod(x[i,], beta[])  
+    like[i] <- logdensity.bern(y[i], pi[i])
+  }
+  
+  # Priors
+  alpha ~ dnorm(0, 0.01)  
+  for(j in 1:p){
+    beta[j] ~ dnorm(0, 0.01) 
+  }
+}")
+
+```
+
+
+```{r}
+data <- list(y=y,x=x,n=n,p=p)
+params <- c("alpha","beta","like")
+burn <- 1000
+n.iter <- 10000
+n.chains <- 3
+```
+
+```{r}
+model3 <- jags.model(model_string,data = data, n.chains=n.chains,quiet=TRUE)
+update(model3, burn, progress.bar="none")
+samples3 <- coda.samples(model3, variable.names=params, n.iter=n.iter, progress.bar="none")
+```
+
+###Number 2
+```{r}
+#Graphical Diagnostics & Statistical summaries
+
+#model1 - linear regression with uninformative priors
+summary(samples1[,1:p+1])
+plot(samples1[,1:p+1]) #trace plot
+autocorr.plot(samples1[,1:p+1]) #auto corr plot
+
+```
+```{r}
+#model3- logistic regression using bernoulli likelihood
+summary(samples3[,1:p+1])
+plot(samples3[,1:p+1])
+autocorr.plot(samples3[,1:p+1])
+```
+
+
+```{r}
+#Numerical diagnostics
+
+#for autocorr, if value apporaches 1, it indicates poor convergence
+#for ess, a low value indicates poor convergence
+#for gelman, R>1.1 indicates poor convergence, approaches 1 indicates good convergence
+#for geweke, |z|>2 indicates poor convergence
+
+#model1
+samples1_beta <- samples1[, grep("^(alpha|beta\\[)", colnames(samples1[[1]]))]
+
+autocorr(samples1_beta[[1]],lag=1) 
+effectiveSize(samples1_beta)
+gelman.diag(samples1_beta)
+geweke.diag(samples1_beta[[1]]) 
+
+```
+
+
+```{r}
+#for autocorr, if value apporaches 1, it indicates poor convergence
+#for ess, a low value indicates poor convergence
+#for gelman, R>1.1 indicates poor convergence, approaches 1 indicates good convergence
+#for geweke, |z|>2 indicates poor convergence
+
+#model3
+samples3_beta <- samples3[, grep("^(alpha|beta\\[)", colnames(samples3[[1]]))]
+
+autocorr(samples3_beta[[1]],lag=1) 
+effectiveSize(samples3_beta)
+gelman.diag(samples3_beta) 
+geweke.diag(samples3_beta[[1]]) 
+```
+```{r}
+#For both models, convergence diagnostics, autocorr, ESS , gelman and geweke tell us that for both of our models, every parameter converges
+
+
+```
+
+###Number 3
+
+
+```{r}
+#DIC 
+dic1 <- dic.samples(model1, n.iter = n.iter, progress.bar = "none")
+print("DIC Model1")
+print(dic1)
+
+dic3 <- dic.samples(model3, n.iter = n.iter, progress.bar = "none")
+print("DIC Model3")
+print(dic3)
+```
+
+```{r}
+#Bayes Factor
+#Bayes > 100, berarti model ke 2 lebih bagus
+bayes_factor <- exp((mean(dic1$deviance) - mean(dic3$deviance)) / 2)
+print(bayes_factor)
+
+bayes_factor <- exp((mean(dic3$deviance) - mean(dic1$deviance)) / 2)
+print(bayes_factor) #hasilnya 0
+```
+
+```{r}
+#WAIC
+#smaller waic = better model
+log_likelihoods1 <- samples1[, grep("^like\\[", colnames(samples1[[1]]))]
+log_likelihoods3 <- samples3[, grep("^like\\[", colnames(samples3[[1]]))]
+
+compute_waic <- function(log_likelihoods) {
+  log_likelihoods <- as.matrix(log_likelihoods)
+  
+  lppd <- sum(log(rowMeans(exp(log_likelihoods))))
+  
+  p_waic <- sum(apply(log_likelihoods, 2, var))
+  
+  waic <- -2 * (lppd - p_waic)
+  list(waic = waic, lppd = lppd, p_waic = p_waic)
+}
+
+# Compute WAIC for both models
+waic1 <- compute_waic(log_likelihoods1)
+waic3 <- compute_waic(log_likelihoods3)
+
+print(waic1)
+print(waic3)
+```
+```{r}
+#Using Bayes factor, we can see that the value of Bayes Factor >1, indicating that the result has preference for model3 based on the bayes factor
+#Using DIC, the penalized deviance of model3 is also significantly less than of model1, hence model3 being a better model
+#lastly, the WAIC statistics also show a lower score for model3, which indicates model3 to be the better model
+``` 
+
+
+###Number 4
+```{r}
+#Based off the Information criteria and bayes factor, the second model, Logistic Regression is highly favored as the better model
+#We can conclude from the means and the confidence interval of each covariate, that  beta4 (Consumer Price Index) and beta5 (Unemployment) negatively affects our target variable While beta1 (presence of holiday flag) positively affects our target variable
+```
+
+
+###Number 5
+```{r}
+model_string <- textConnection("model{
+  # Likelihood
+  for(i in 1:n){
+    y[i] ~ dbern(pi[i])  
+    logit(pi[i]) <- alpha + inprod(x[i,], beta[])  
+  }
+  
+  # Priors
+  alpha ~ dnorm(0, 0.01)  
+  for(j in 1:p){
+    beta[j] ~ dnorm(0, 0.01) 
+  }
+
+  # Posterior Predictive Checks
+  for(i in 1:n){
+    y_rep[i] ~ dbern(pi[i])  
+  }
+  D[1] <- mean(y_rep[])      
+  D[2] <- sd(y_rep[])      
+  D[3] <- sum(y_rep[])     
+}")
+
+data <- list(y = y, x = x, n = n, p = p)
+params <- c("alpha", "beta", "D", "y_rep")
+model <- jags.model(model_string, data = data, n.chains = n.chains, quiet = TRUE)
+update(model, burn)
+samples <- coda.samples(model, variable.names = params, n.iter = n.iter, progress.bar = "none")
+```
+
+```{r}
+# Test statistics for observed data
+D_obs <- c(mean(y), sd(y), sum(y))
+names(D_obs) <- c("Mean", "StdDev", "Sum")
+
+posterior_D <- as.matrix(samples)[, grep("^D\\[", colnames(as.matrix(samples)))]
+
+# Initialize p-values
+pval <- rep(0, length(D_obs))
+names(pval) <- names(D_obs)
+
+# Plot and compute p-values
+par(mfrow = c(1, length(D_obs)))  # Arrange plots
+for (j in seq_along(D_obs)) {
+  # Plot density of simulated test statistic
+  plot(density(posterior_D[, j]), 
+       main = names(D_obs)[j], xlab = "D", ylab = "Density")
+  abline(v = D_obs[j], col = "red")  # Observed value
+  legend("topright", legend = c("Model", "Observed"), col = c("black", "red"), lty = 1)
+
+  # Compute posterior predictive p-value
+  pval[j] <- mean(posterior_D[, j] >= D_obs[j])
+}
+pval
+
+```
+
